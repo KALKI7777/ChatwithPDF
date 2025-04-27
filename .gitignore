@@ -1,0 +1,27 @@
+# Ignore Python virtual environments
+venv/
+
+# Ignore environment variable files
+.env
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+dist/
+build/
+.eggs/
+*.egg-info/
+
+# VS Code settings
+.vscode/
+
+# macOS and Windows system files
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
