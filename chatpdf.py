@@ -1,28 +1,27 @@
 import streamlit as st
-from PyPDF2 import PdfReader # reads pdf
-from langchain.text_splitter import RecursiveCharacterTextSplitter # splits text
+from PyPDF2 import PdfReader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 import os
-from langchain_google_genai import GoogleGenerativeAIEmbeddings  # embeds text
-import google.generativeai as genai 
-from langchain_community.vectorstores import FAISS # creates vector store
-from langchain_google_genai import ChatGoogleGenerativeAI 
-from langchain.chains.question_answering import load_qa_chain # loads qa chain
-from langchain.prompts import PromptTemplate # loads prompt
-from dotenv import load_dotenv # loads api key
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+import google.generativeai as genai
+from langchain_community.vectorstores import FAISS
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.chains.question_answering import load_qa_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains import create_retrieval_chain
+from langchain.prompts import PromptTemplate
+from dotenv import load_dotenv
 
 load_dotenv()
 os.getenv("GOOGLE_API_KEY")
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
 
+
+
+
+
 def get_pdf_text(pdf_docs):
-    """
-    Function to extract text from pdfs
-    Parameters:
-        pdf_docs (list): List of pdf documents
-    Returns:
-        text (str): Text extracted from pdfs
-    """
     text=""
     for pdf in pdf_docs:
         pdf_reader= PdfReader(pdf)
@@ -31,402 +30,358 @@ def get_pdf_text(pdf_docs):
     return  text
 
 
+
 def get_text_chunks(text):
-    """
-    Splits the given text into chunks of specified size with overlap.
-
-    Parameters:
-        text (str): The text to be split into chunks.
-
-    Returns:
-        List[str]: A list of text chunks.
-    """
-
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=10000, chunk_overlap=1000)
     chunks = text_splitter.split_text(text)
     return chunks
 
 
 def get_vector_store(text_chunks):
-    """
-    Create a vector store from the given text chunks.
-
-    Parameters:
-        text_chunks (list): A list of text chunks.
-
-    Returns:
-        None
-    """
     embeddings = GoogleGenerativeAIEmbeddings(model = "models/embedding-001")
     vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
     vector_store.save_local("faiss_index")
 
 
-def get_conversational_chain():
-
+def get_conversational_model():
     prompt_template = """
     Answer the question as detailed as possible from the provided context, make sure to provide all the details, if the answer is not in
     provided context just say, "answer is not available in the context", don't provide the wrong answer\n\n
     Context:\n {context}?\n
     Question: \n{question}\n
-
     Answer:
     """
 
-    model = ChatGoogleGenerativeAI(model="models/gemini-1.5-pro", temperature=0.3)
+    model = ChatGoogleGenerativeAI(model="gemini-2.0-flash",
+                             temperature=0.3)
 
     prompt = PromptTemplate(template = prompt_template, input_variables = ["context", "question"])
-    chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
-
-    return chain
+    
+    return model, prompt
 
 
 
 def user_input(user_question):
-    """
-    This function takes a user question as input and returns the best answer based on the input text chunks.
+    try:
+        # Initialize embeddings
+        embeddings = GoogleGenerativeAIEmbeddings(model = "models/embedding-001")
+        
+        # Load the vector store
+        new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
+        
+        # Search for similar documents
+        docs = new_db.similarity_search(user_question, k=4)  # Get top 4 most relevant chunks
+        
+        # Get the model and prompt
+        model, prompt = get_conversational_model()
+        
+        # Extract the content from documents and create the context
+        context = "\n\n".join([doc.page_content for doc in docs])
+        
+        # Use the model directly with the prompt template
+        response = model.invoke(prompt.format(context=context, question=user_question))
+        
+        # Return the response content as a string
+        return response.content
+    except Exception as e:
+        # Handle errors gracefully
+        print(f"Error in user_input: {str(e)}")
+        return f"I encountered an error: {str(e)}. Please make sure you've uploaded and processed documents before asking questions."
 
-    Parameters:
-        user_question (str): The user's question.
-
-    Returns:
-        None
-    """
-    embeddings = GoogleGenerativeAIEmbeddings(model = "models/embedding-001")
-    
-    new_db = FAISS.load_local("faiss_index", embeddings,allow_dangerous_deserialization=True)
-    docs = new_db.similarity_search(user_question)
-
-    chain = get_conversational_chain()
-
-    
-    response = chain(
-        {"input_documents":docs, "question": user_question}
-        , return_only_outputs=True)
-
-    print(response)
-    st.write("Reply: ", response["output_text"])
 
 
 
 def main():
-    # Configure the page with custom theme and layout
+    # Page configuration with a custom theme
     st.set_page_config(
-        page_title="PDF Assistant Pro", 
-        page_icon="📚", 
-        layout="wide",
-        initial_sidebar_state="expanded"
+        page_title="PDF Chat Assistant",
+        page_icon="📚",
+        layout="wide"
     )
     
-    # Initialize session state for chat history if it doesn't exist
-    if 'chat_history' not in st.session_state:
-        st.session_state.chat_history = []
-    
-    # Initialize session state for user input processing
-    if 'user_input_processed' not in st.session_state:
-        st.session_state.user_input_processed = False
-    
-    # Reset the processed flag when the page loads
-    st.session_state.user_input_processed = False
-    
-    # Function to handle question submission
-    def handle_question_submission(question):
-        from datetime import datetime
-        current_time = datetime.now().strftime("%H:%M")
-        
-        # Add user message to chat history
-        st.session_state.chat_history.append({
-            "role": "user",
-            "content": question,
-            "timestamp": current_time
-        })
-        
-        # Process the question
-        try:
-            # Get the answer
-            embeddings = GoogleGenerativeAIEmbeddings(model = "models/embedding-001")
-            new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-            docs = new_db.similarity_search(question)
-            
-            chain = get_conversational_chain()
-            response = chain(
-                {"input_documents": docs, "question": question},
-                return_only_outputs=True
-            )
-            
-            # Add assistant response to chat history
-            st.session_state.chat_history.append({
-                "role": "assistant",
-                "content": response["output_text"],
-                "timestamp": current_time
-            })
-            
-        except Exception as e:
-            # Add error message to chat history
-            error_message = f"I'm sorry, I encountered an error: {str(e)}"
-            st.session_state.chat_history.append({
-                "role": "assistant",
-                "content": error_message,
-                "timestamp": current_time
-            })
-        
-        # Mark input as processed
-        st.session_state.user_input_processed = True
-        
-        # Clear the input box
-        st.session_state.user_input = ""
-    
-    # Callback for text input
-    def on_input_change():
-        if st.session_state.user_input and not st.session_state.user_input_processed:
-            handle_question_submission(st.session_state.user_input)
-    
-    # Custom CSS for styling
+    # Custom CSS for better styling with a more engaging color scheme
     st.markdown("""
     <style>
-        /* Main theme colors */
-        :root {
-            --primary-color: #4527A0;
-            --secondary-color: #7E57C2;
-            --accent-color: #FFD54F;
-            --text-color: #212121;
-            --background-color: #F5F7F9;
-            --card-background: #FFFFFF;
-        }
-        
-        /* Header styling */
-        .header {
-            padding: 1.5rem 0;
-            text-align: center;
-            border-bottom: 1px solid #e0e0e0;
-            margin-bottom: 0rem;
-        }
-        
-        .header h1 {
-            color: var(--primary-color);
-            font-size: 2.2rem;
-            margin-bottom: 0.5rem;
-        }
-        
-        .header p {
-            color: #666;
-            font-size: 1.1rem;
-        }
-        
-        /* Section headings */
-        h3 {
-            margin-top: 0;
-            margin-bottom: 0.5rem;
-        }
-        
-        /* Remove extra padding from containers */
-        .stVerticalBlock {
-            gap: 0.5rem !important;
-        }
-        
-        /* Message styling */
-        .message {
-            margin-bottom: 1rem;
-            padding: 0.8rem 1rem;
-            border-radius: 10px;
-            max-width: 80%;
-            position: relative;
-            word-wrap: break-word;
-        }
-        
-        .user-message {
-            background-color: var(--primary-color);
-            color: white;
-            margin-left: auto;
-            border-bottom-right-radius: 0;
-        }
-        
-        .assistant-message {
-            background-color: white;
-            border: 1px solid #e0e0e0;
-            margin-right: auto;
-            border-bottom-left-radius: 0;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-            color: rgb(69, 39, 160);
-        }
-        
-        /* Timestamp styling */
-        .timestamp {
-            font-size: 0.7rem;
-            opacity: 0.7;
-            text-align: right;
-            margin-top: 0.3rem;
-        }
-        
-        /* Input area styling */
-        .input-area {
-            display: flex;
-            gap: 0.5rem;
-        }
-        
-        /* Welcome message */
-        .welcome-message {
-            text-align: center;
-            color: #666;
-            padding: 2rem;
-            margin: 2rem 0;
-            background-color: #f9f9f9;
-            border-radius: 10px;
-            border: 1px solid #e0e0e0;
-        }
-        
-        /* Welcome message details */
-        .welcome-message h3 {
-            margin-top: 0;
-            margin-bottom: 0.5rem;
-        }
-        
-        .welcome-message p {
-            margin: 0.25rem 0;
-        }
-        
-        /* File upload area */
-        .file-upload {
-            border: 1px solid #e0e0e0;
-            border-radius: 10px;
-            padding: 1.5rem;
-            margin-bottom: 1rem;
-        }
-        
-        /* Button styling */
-        .stButton>button {
-            background-color: var(--primary-color);
-            color: white;
-            border: none;
-            padding: 0.5rem 1rem;
-            border-radius: 5px;
-            font-weight: 500;
-        }
-        
-        .stButton>button:hover {
-            background-color: var(--secondary-color);
-        }
-        
-        /* Example questions */
-        .example-question {
-            background-color: rgba(126, 87, 194, 0.1);
-            padding: 0.5rem 1rem;
-            border-radius: 5px;
-            margin-bottom: 0.5rem;
-            cursor: pointer;
-        }
-        
-        .example-question:hover {
-            background-color: rgba(126, 87, 194, 0.2);
-        }
+    /* Overall page styling */
+    .stApp {
+        background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+    }
+    
+    /* Main header styling */
+    .main-header {
+        font-size: 2.8rem;
+        background: linear-gradient(to right, #1e3c72, #2a5298);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin-bottom: 20px;
+        text-align: center;
+        font-weight: 800;
+        text-shadow: 2px 2px 4px rgba(0,0,0,0.1);
+    }
+    
+    /* Subheader styling */
+    .subheader {
+        font-size: 1.7rem;
+        color: #E0F7FA;
+        margin-bottom: 20px;
+        font-weight: 600;
+        border-bottom: 2px solid #00BCD4;
+        padding-bottom: 8px;
+        text-shadow: 1px 1px 2px rgba(0,0,0,0.2);
+    }
+    
+    /* Button styling */
+    .stButton>button {
+        background: linear-gradient(to right, #00B4DB, #0083B0);
+        color: white;
+        border-radius: 30px;
+        padding: 12px 24px;
+        font-weight: bold;
+        width: 100%;
+        border: none;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        transition: all 0.3s ease;
+    }
+    
+    .stButton>button:hover {
+        background: linear-gradient(to right, #0083B0, #00B4DB);
+        transform: translateY(-2px);
+        box-shadow: 0 6px 8px rgba(0,0,0,0.15);
+    }
+    
+    /* Upload section styling */
+    .upload-section {
+        background-color: rgba(255, 255, 255, 0.1);
+        backdrop-filter: blur(10px);
+        padding: 25px;
+        border-radius: 15px;
+        margin-bottom: 20px;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+    }
+    
+    /* Chat container styling */
+    .chat-container {
+        background-color: rgba(255, 255, 255, 0.1);
+        backdrop-filter: blur(10px);
+        padding: 25px;
+        border-radius: 15px;
+        margin-top: 20px;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        max-height: 600px;
+        overflow-y: auto;
+    }
+    
+    /* Message styling */
+    .chat-message {
+        padding: 15px;
+        border-radius: 15px;
+        margin-bottom: 15px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        transition: transform 0.2s ease;
+    }
+    
+    .chat-message:hover {
+        transform: translateY(-2px);
+    }
+    
+    /* User message styling */
+    .user-message {
+        background: linear-gradient(135deg, #1A237E, #283593);
+        color: white;
+        border-left: 5px solid #536DFE;
+        margin-left: 20px;
+        margin-right: 5px;
+    }
+    
+    /* AI message styling */
+    .bot-message {
+        background: linear-gradient(135deg, #004D40, #00695C);
+        color: white;
+        border-left: 5px solid #00BFA5;
+        margin-right: 20px;
+        margin-left: 5px;
+    }
+    
+    /* Form styling */
+    .stForm {
+        background-color: rgba(255, 255, 255, 0.1);
+        padding: 20px;
+        border-radius: 15px;
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+    }
+    
+    /* Text input styling */
+    .stTextInput>div>div>input {
+        background-color: rgba(255, 255, 255, 0.1);
+        color: white;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        border-radius: 10px;
+        padding: 12px 20px;
+    }
+    
+    /* Info message styling */
+    .stAlert {
+        background-color: rgba(33, 150, 243, 0.1);
+        color: #E3F2FD;
+        border: 1px solid rgba(33, 150, 243, 0.2);
+        border-radius: 10px;
+    }
+    
+    /* Success message styling */
+    .element-container div[data-testid="stText"] p:has(span[style*="color:green"]) {
+        background-color: rgba(76, 175, 80, 0.1);
+        color: #E8F5E9;
+        padding: 10px;
+        border-radius: 10px;
+        border-left: 5px solid #4CAF50;
+    }
+    
+    /* File uploader styling */
+    .stFileUploader>div>button {
+        background-color: rgba(255, 255, 255, 0.1);
+        color: white;
+    }
+    
+    /* Progress bar styling */
+    .stProgress>div>div>div>div {
+        background: linear-gradient(to right, #00B4DB, #0083B0);
+    }
     </style>
     """, unsafe_allow_html=True)
     
     # App header
-    st.markdown("<div class='header'><h1>📚 PDF Assistant Pro</h1><p>Upload PDFs and chat with your documents</p></div>", unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">📚 PDF Chat Assistant with Gemini AI</h1>', unsafe_allow_html=True)
+    st.markdown('<p style="text-align: center;">Upload your PDF documents and chat with them using Google Gemini AI</p>', unsafe_allow_html=True)
     
-    # Create two columns for layout
-    col1, col2 = st.columns([3, 1])
+    # Create two columns for the layout - chat on left (larger), upload on right
+    col1, col2 = st.columns([2, 1])
     
-    with col2:
-        # File upload section
-        st.markdown("<h3>Upload Documents</h3>", unsafe_allow_html=True)
+    # Main chat interface on the left
+    with col1:
+        st.markdown('<h2 class="subheader">💬 Chat Interface</h2>', unsafe_allow_html=True)
         
+        # Initialize chat history in session state if it doesn't exist
+        if 'chat_history' not in st.session_state:
+            st.session_state.chat_history = []
+        
+        # Display chat history with more visible styling
         with st.container():
-            pdf_docs = st.file_uploader(
-                "Upload PDF files", 
-                accept_multiple_files=True,
-                type=['pdf'],
-                help="Upload one or more PDF documents to analyze"
+            st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+            
+            # Display each message in the chat history
+            if st.session_state.chat_history:
+                for message in st.session_state.chat_history:
+                    if message['role'] == 'user':
+                        # User messages with gradient background and proper line breaks
+                        # Replace newlines with <br> tags to preserve formatting
+                        formatted_content = message["content"].replace("\n", "<br>")
+                        st.markdown(
+                            f'''
+                            <div style="background: linear-gradient(135deg, #1A237E, #283593); padding: 15px; border-radius: 15px; margin-bottom: 15px; border-left: 5px solid #536DFE; color: white; margin-left: 20px; margin-right: 5px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); white-space: pre-wrap;">
+                                <strong>You:</strong><br>{formatted_content}
+                            </div>
+                            ''', 
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        # AI messages with gradient background and proper line breaks
+                        # Replace newlines with <br> tags to preserve formatting
+                        formatted_content = message["content"].replace("\n", "<br>")
+                        st.markdown(
+                            f'''
+                            <div style="background: linear-gradient(135deg, #004D40, #00695C); padding: 15px; border-radius: 15px; margin-bottom: 15px; border-left: 5px solid #00BFA5; color: white; margin-right: 20px; margin-left: 5px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); white-space: pre-wrap;">
+                                <strong>AI:</strong><br>{formatted_content}
+                            </div>
+                            ''', 
+                            unsafe_allow_html=True
+                        )
+            else:
+                st.info("Upload and process documents, then ask questions to start the conversation.")
+            
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Initialize session state variables if they don't exist
+        if 'input_key' not in st.session_state:
+            st.session_state.input_key = 0  # This will be used to reset the input field
+        
+        # Function to handle form submission and process the question immediately
+        def handle_submit():
+            if st.session_state.current_question.strip():  # Only process if there's a non-empty question
+                # Get the question
+                question = st.session_state.current_question.strip()
+                
+                # Add user question to chat history
+                st.session_state.chat_history.append({"role": "user", "content": question})
+                
+                try:
+                    # Process the question immediately
+                    response = user_input(question)
+                    
+                    # Add AI response to chat history
+                    st.session_state.chat_history.append({"role": "assistant", "content": response})
+                except Exception as e:
+                    # Handle errors
+                    st.session_state.chat_history.append({"role": "assistant", "content": f"Error: {str(e)}. Please make sure you've processed documents before asking questions."})
+        
+        # Create a form for better input handling
+        with st.form(key="question_form", clear_on_submit=True):
+            # User input with the dynamic key
+            user_question = st.text_input(
+                "Ask a question about your documents",
+                placeholder="What would you like to know about the PDFs?",
+                key="current_question"
             )
             
-            # Process button
-            process_btn = st.button("Process Documents", type="primary", key="process_btn")
-            
-            # Display uploaded files
-            if pdf_docs:
-                st.write(f"**{len(pdf_docs)}** documents ready")
-                for pdf in pdf_docs:
-                    st.write(f"📄 {pdf.name}")
-            
-            if process_btn and pdf_docs:
-                with st.spinner("Processing documents..."):
-                    # Process the PDFs
-                    raw_text = get_pdf_text(pdf_docs)
-                    
-                    # Create progress bar
-                    progress_bar = st.progress(0)
-                    
-                    # Update progress
-                    progress_bar.progress(30)
-                    st.info("Splitting text...")
-                    text_chunks = get_text_chunks(raw_text)
-                    
-                    progress_bar.progress(60)
-                    st.info("Creating embeddings...")
-                    get_vector_store(text_chunks)
-                    
-                    progress_bar.progress(100)
-                    st.success("✅ Processing complete!")
-                    
-                    # Add system message to chat
-                    from datetime import datetime
-                    current_time = datetime.now().strftime("%H:%M")
-                    
-                    system_message = f"I've processed {len(pdf_docs)} documents with {len(text_chunks)} text chunks. You can now ask questions about them."
-                    
-                    if not any(msg.get("content") == system_message for msg in st.session_state.chat_history if msg.get("role") == "assistant"):
-                        st.session_state.chat_history.append({
-                            "role": "assistant",
-                            "content": system_message,
-                            "timestamp": current_time
-                        })
+            # Submit button
+            submit_button = st.form_submit_button("Send", on_click=handle_submit)
+    
+    # Document upload on the right
+    with col2:
+        st.markdown('<h2 class="subheader">📄 Document Upload</h2>', unsafe_allow_html=True)
         
-    with col1:
-        # Chat heading
-        st.markdown("<h3>Chat with your Documents</h3>", unsafe_allow_html=True)
-        
-        # Welcome message if no chat history
-        if not st.session_state.chat_history:
-            st.markdown("""
-            <div class='welcome-message'>
-                <h3>Welcome to PDF Assistant Pro!</h3>
-                <p>Upload your PDF documents and ask questions about them.</p>
-                <p>Your conversation will appear here.</p>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            # Display all messages in the chat history
-            for message in st.session_state.chat_history:
-                if message["role"] == "user":
-                    st.markdown(f"""
-                    <div class='message user-message'>
-                        {message["content"]}
-                        <div class='timestamp'>{message["timestamp"]}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+        with st.container():
+            st.markdown('<div class="upload-section">', unsafe_allow_html=True)
+            pdf_docs = st.file_uploader(
+                "Upload your PDF files",
+                accept_multiple_files=True,
+                help="Select one or more PDF files to analyze"
+            )
+            
+            if st.button("Process Documents"):
+                if pdf_docs:
+                    with st.spinner("Processing your documents..."):
+                        # Progress bar for better UX
+                        progress_bar = st.progress(0)
+                        
+                        # Step 1: Extract text
+                        progress_bar.progress(25)
+                        st.info("Extracting text from PDFs...")
+                        raw_text = get_pdf_text(pdf_docs)
+                        
+                        # Step 2: Split into chunks
+                        progress_bar.progress(50)
+                        st.info("Splitting text into chunks...")
+                        text_chunks = get_text_chunks(raw_text)
+                        
+                        # Step 3: Create vector store
+                        progress_bar.progress(75)
+                        st.info("Creating vector embeddings...")
+                        get_vector_store(text_chunks)
+                        
+                        # Complete
+                        progress_bar.progress(100)
+                        st.success("✅ Documents processed successfully! You can now ask questions.")
                 else:
-                    st.markdown(f"""
-                    <div class='message assistant-message'>
-                        {message["content"]}
-                        <div class='timestamp'>{message["timestamp"]}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+                    st.error("Please upload at least one PDF document")
+            st.markdown('</div>', unsafe_allow_html=True)
         
-        # Add clear chat button
-        if st.session_state.chat_history:
-            if st.button("Clear Chat History", key="clear_chat"):
-                st.session_state.chat_history = []
-                st.rerun()
-        
-        # Chat input
-        st.markdown("<div class='input-area'>", unsafe_allow_html=True)
-        user_input = st.text_input(
-            "Ask a question about your documents:",
-            key="user_input",
-            on_change=on_input_change
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
+        # We don't need the pending_question logic anymore since we process questions directly in handle_submit
+        # This section is intentionally left empty to remove the old processing logic
+
+
 
 if __name__ == "__main__":
     main()
